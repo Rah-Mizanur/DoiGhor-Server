@@ -1,7 +1,7 @@
 require('dotenv').config()
 const express = require('express')
 const cors = require('cors')
-const { MongoClient, ServerApiVersion } = require('mongodb')
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb')
 const admin = require('firebase-admin')
 const port = process.env.PORT || 3000
 const decoded = Buffer.from(process.env.Fb_Key, 'base64').toString(
@@ -54,18 +54,120 @@ const client = new MongoClient(process.env.MONGODB_URI, {
 async function run() {
   try {
     const db = client.db('doighor')
-    const salesCollection = db.collection('sales')
+    const ordersCollection = db.collection('orders')
+    const usersCollection = db.collection('users')
+    const deletedOrderCollection = db.collection('deletedOrder')
+        // save or update a user in db
+    app.post('/user', async (req, res) => {
+      const userData = req.body
+      userData.created_at = new Date().toISOString()
+      userData.last_loggedIn = new Date().toISOString()
+      userData.role = 'customer'
 
-    app.post('/sales',verifyJWT,async(req,res)=>{
-      const saleData = req.body;
-      saleData.saletime = new Date()
-      const result = salesCollection.insertOne(saleData)
+      const query = {
+        email: userData.email,
+      }
+
+      const alreadyExists = await usersCollection.findOne(query)
+      console.log('User Already Exists---> ', !!alreadyExists)
+
+      if (alreadyExists) {
+        console.log('Updating user info......')
+        const result = await usersCollection.updateOne(query, {
+          $set: {
+            last_loggedIn: new Date().toISOString(),
+          },
+        })
+        return res.send(result)
+      }
+
+      console.log('Saving new user info......')
+      const result = await usersCollection.insertOne(userData)
       res.send(result)
     })
-    app.get('/sales',verifyJWT,async(req,res)=>{
-      const result = await salesCollection.find().toArray()
+
+      app.get('/user/role', verifyJWT, async (req, res) => {
+      const result = await usersCollection.findOne({ email: req.tokenEmail })
+      res.send({ role: result?.role })
+    })
+
+    app.post('/orders',verifyJWT,async(req,res)=>{
+      const orderData = req.body;
+      orderData.orderTime = new Date()
+      orderData.status = 'pending'
+      const result = ordersCollection.insertOne(orderData)
       res.send(result)
     })
+    app.get('/orders',verifyJWT,async(req,res)=>{
+       const searchQuery = req.query.search || '';
+      const result = await ordersCollection.find({
+        $or:[
+          {
+            customerName :{ $regex: searchQuery, $options: 'i' }
+          }
+        ]
+      }).toArray()
+      res.send(result)
+    })
+     app.get("/order-details/:id", async (req, res) => {
+      const { id } = req.params;
+      const result = await ordersCollection.findOne({
+        _id: new ObjectId(id),
+      });
+      res.send(result);
+    });
+
+        app.patch("/update-order", verifyJWT, async (req, res) => {
+      const { id, status,totalPay,seller} = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const time = new Date()
+      const updateDoc = {
+        $set: {
+          totalPay : totalPay,
+          status: status,
+          seller : seller,
+          sellTime : time ,
+        },
+      };
+      const result = await ordersCollection.updateOne(filter, updateDoc);
+      res.send(result);
+    });
+
+
+    // delete order and save arcive 
+
+    app.post("/delete-request", verifyJWT, async (req, res) => {
+  try {
+    const { id, sale } = req.body;
+
+    // Validate ID
+    if (!id || !ObjectId.isValid(id)) {
+      return res.status(400).send({ error: "Invalid request ID" });
+    }
+
+    // Prepare archive data
+    const archiveData = {
+      ...sale,           // include all original fields
+      originalId: id,       // keep track of original _id
+      deletedAt: new Date(), // deletion timestamp
+    };
+
+    // Remove _id to avoid conflicts
+    delete archiveData._id;
+
+    // Insert full request data into deleted collection
+    const result = await deletedOrderCollection.insertOne(archiveData);
+
+    // Delete the original request from main collection
+    await ordersCollection.deleteOne({ _id: new ObjectId(id) });
+    // console.log(archiveData)
+    console.log("Archived and deleted:", result);
+    res.send({ success: true, result });
+  } catch (err) {
+    console.error("Delete request error:", err);
+    res.status(500).send({ error: "Failed to delete request" });
+  }
+});
     // Send a ping to confirm a successful connection
     await client.db('admin').command({ ping: 1 })
     console.log(
